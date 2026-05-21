@@ -40,7 +40,7 @@ func run(port, csvPath string, logger *slog.Logger) error {
 	logger.Info("loaded device definitions", "count", len(ids), "path", csvPath)
 
 	memStore := store.NewMemoryStore()
-	fleet := service.New(memStore)
+	fleet := service.New(memStore, logger)
 	fleet.RegisterDevices(ids)
 
 	r := chi.NewRouter()

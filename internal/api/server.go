@@ -1,11 +1,9 @@
 package api
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fleetmetrics/internal/service"
-	"io"
 	"log/slog"
 	"net/http"
 	"time"
@@ -33,6 +31,7 @@ func (s *Server) PostDevicesDeviceIdHeartbeat(w http.ResponseWriter, r *http.Req
 		return
 	}
 	if req.SentAt.IsZero() {
+		s.logger.Warn("heartbeat missing sent_at", "device_id", deviceID)
 		s.writeError(w, http.StatusBadRequest, "sent_at is required")
 		return
 	}
@@ -51,20 +50,15 @@ func (s *Server) PostDevicesDeviceIdHeartbeat(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) PostDevicesDeviceIdStats(w http.ResponseWriter, r *http.Request, deviceID DeviceIDPathParam) {
-	rawBody, _ := io.ReadAll(r.Body)
-	s.logger.Info("stats POST raw body", "device_id", deviceID, "body", string(rawBody))
-	r.Body = io.NopCloser(bytes.NewReader(rawBody))
-
 	var req struct {
 		SentAt     time.Time `json:"sent_at"`
 		UploadTime float64   `json:"upload_time"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
-		s.logger.Error("stats POST decode error", "device_id", deviceID, "err", err)
+		s.logger.Warn("stats decode error", "device_id", deviceID, "err", err)
 		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	s.logger.Info("stats POST decoded", "device_id", deviceID, "sent_at", req.SentAt, "upload_time", req.UploadTime)
 	if req.UploadTime < 0 {
 		s.writeError(w, http.StatusBadRequest, "upload_time must be non-negative")
 		return
