@@ -2,7 +2,7 @@ package store
 
 import (
 	"errors"
-	"fleetmetrics/model"
+	"fleetmetrics/internal/model"
 )
 
 var ErrDeviceNotFound = errors.New("device not found")
