@@ -1,11 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fleetmetrics/internal/service"
+	"io"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 type Server struct {
@@ -44,24 +47,28 @@ func (s *Server) PostDevicesDeviceIdHeartbeat(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) PostDevicesDeviceIdStats(w http.ResponseWriter, r *http.Request, deviceID DeviceIDPathParam) {
-	var req PostDevicesDeviceIdStatsJSONRequestBody
+	rawBody, _ := io.ReadAll(r.Body)
+	s.logger.Info("stats POST raw body", "device_id", deviceID, "body", string(rawBody))
+	r.Body = io.NopCloser(bytes.NewReader(rawBody))
+
+	var req struct {
+		SentAt     time.Time `json:"sent_at"`
+		UploadTime float64   `json:"upload_time"`
+	}
 	if err := decodeJSON(r, &req); err != nil {
+		s.logger.Error("stats POST decode error", "device_id", deviceID, "err", err)
 		s.writeError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
 		return
 	}
-	if req.SentAt.IsZero() {
-		s.writeError(w, http.StatusBadRequest, "sent_at is required")
-		return
-	}
+	s.logger.Info("stats POST decoded", "device_id", deviceID, "sent_at", req.SentAt, "upload_time", req.UploadTime)
 	if req.UploadTime < 0 {
 		s.writeError(w, http.StatusBadRequest, "upload_time must be non-negative")
 		return
 	}
-
 
 	if err := s.fleet.RecordUploadTime(deviceID, req.SentAt, int64(req.UploadTime)); err != nil {
 		if errors.Is(err, service.ErrDeviceNotFound) {
@@ -73,7 +80,7 @@ func (s *Server) PostDevicesDeviceIdStats(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) GetDevicesDeviceIdStats(w http.ResponseWriter, r *http.Request, deviceID DeviceIDPathParam) {
@@ -98,12 +105,8 @@ func (s *Server) GetDevicesDeviceIdStats(w http.ResponseWriter, r *http.Request,
 
 func decodeJSON(r *http.Request, dst any) error {
 	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return err
-	}
-	if dec.More() {
-		return errors.New("unexpected data after JSON value")
 	}
 	return nil
 }

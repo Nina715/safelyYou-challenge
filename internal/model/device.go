@@ -67,7 +67,7 @@ func (d *DeviceData) ComputeStats() DeviceStats {
 	case d.firstHeartbeat.Equal(d.lastHeartbeat):
 		stats.Uptime = 100
 	default:
-		windowMinutes := int64(d.lastHeartbeat.Sub(d.firstHeartbeat)/time.Minute) + 1
+		windowMinutes := int64(d.lastHeartbeat.Sub(d.firstHeartbeat) / time.Minute)
 		stats.Uptime = (float64(len(d.heartbeats)) / float64(windowMinutes)) * 100
 	}
 

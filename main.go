@@ -54,7 +54,7 @@ func run(port, csvPath string, logger *slog.Logger) error {
 	})
 
 	apiServer := api.NewServer(fleet, logger)
-	api.HandlerFromMux(apiServer, r)
+	api.HandlerFromMuxWithBaseURL(apiServer, r, "/api/v1")
 
 	srv := &http.Server{
 		Addr:              ":" + port,
