@@ -5,14 +5,23 @@ import (
 	"time"
 )
 
+// WindowMinutes is the size of the rolling window used for uptime calculation.
+// Heartbeats older than this are evicted, bounding memory to WindowMinutes bytes per device.
+const WindowMinutes = 1440 // 24 hours
+
 type DeviceData struct {
-	mu sync.RWMutex
-	firstHeartbeat time.Time
-	lastHeartbeat time.Time
-	hasHeartbeats bool
-	uploadTimeSum   int64
-	uploadTimeCount int64 
-	heartbeats map[time.Time]struct{}
+	mu         sync.RWMutex
+	slots      []bool    // ring buffer: slot i tracks whether minute (origin + i) had a heartbeat
+	head       int       // ring index of the oldest minute (= origin)
+	count      int       // number of active (true) slots in the window
+	windowSize int
+	origin     time.Time // wall-clock minute that ring index head corresponds to
+	hasData    bool
+
+	// Welford's online algorithm: avoids int64 overflow and catastrophic
+	// cancellation that affect the naive sum/count approach at large sample counts.
+	uploadCount int64
+	uploadMean  float64 // running mean in nanoseconds
 }
 
 type DeviceStats struct {
@@ -22,7 +31,8 @@ type DeviceStats struct {
 
 func NewDeviceData() *DeviceData {
 	return &DeviceData{
-		heartbeats: make(map[time.Time]struct{}),
+		slots:      make([]bool, WindowMinutes),
+		windowSize: WindowMinutes,
 	}
 }
 
@@ -32,47 +42,84 @@ func (d *DeviceData) RecordHeartbeat(sentAt time.Time) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	d.heartbeats[minute] = struct{}{}
-
-	if !d.hasHeartbeats {
-		d.firstHeartbeat = minute
-		d.lastHeartbeat = minute
-		d.hasHeartbeats = true
+	if !d.hasData {
+		d.origin = minute
+		d.hasData = true
+		d.slots[0] = true
+		d.count = 1
 		return
 	}
 
-	if minute.Before(d.firstHeartbeat) {
-		d.firstHeartbeat = minute
+	offset := int(minute.Sub(d.origin) / time.Minute)
+	if offset < 0 {
+		return // older than the window start; ignore
 	}
-	if minute.After(d.lastHeartbeat) {
-		d.lastHeartbeat = minute
+
+	if offset >= d.windowSize {
+		// Slide the window forward, clearing evicted slots.
+		advance := offset - d.windowSize + 1
+		if advance > d.windowSize {
+			advance = d.windowSize
+		}
+		for i := 0; i < advance; i++ {
+			idx := (d.head + i) % d.windowSize
+			if d.slots[idx] {
+				d.slots[idx] = false
+				d.count--
+			}
+		}
+		d.head = (d.head + advance) % d.windowSize
+		d.origin = d.origin.Add(time.Duration(advance) * time.Minute)
+		offset = d.windowSize - 1
+	}
+
+	idx := (d.head + offset) % d.windowSize
+	if !d.slots[idx] {
+		d.slots[idx] = true
+		d.count++
 	}
 }
 
-func (d *DeviceData) RecordUploadTime(uploadTimeMs int64) {
+func (d *DeviceData) RecordUploadTime(ns int64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.uploadTimeSum += uploadTimeMs
-	d.uploadTimeCount++
+	d.uploadCount++
+	d.uploadMean += (float64(ns) - d.uploadMean) / float64(d.uploadCount)
 }
-
 
 func (d *DeviceData) ComputeStats() DeviceStats {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
+
 	var stats DeviceStats
-	switch {
-	case !d.hasHeartbeats:
-		stats.Uptime = 0
-	case d.firstHeartbeat.Equal(d.lastHeartbeat):
-		stats.Uptime = 100
-	default:
-		windowMinutes := int64(d.lastHeartbeat.Sub(d.firstHeartbeat) / time.Minute)
-		stats.Uptime = (float64(len(d.heartbeats)) / float64(windowMinutes)) * 100
+
+	// Uptime and avg upload time are independent: compute each only when data exists.
+	if d.hasData && d.count > 0 {
+		// Scan the ring buffer in logical order (head = oldest) to find the
+		// first and last active minute offsets.
+		first, last := -1, -1
+		for i := 0; i < d.windowSize; i++ {
+			if d.slots[(d.head+i)%d.windowSize] {
+				if first == -1 {
+					first = i
+				}
+				last = i
+			}
+		}
+
+		if first == last {
+			stats.Uptime = 100
+		} else {
+			uptime := (float64(d.count) / float64(last-first)) * 100
+			if uptime > 100 {
+				uptime = 100
+			}
+			stats.Uptime = uptime
+		}
 	}
 
-	if d.uploadTimeCount > 0 {
-		stats.AvgUploadTime = d.uploadTimeSum / d.uploadTimeCount
+	if d.uploadCount > 0 {
+		stats.AvgUploadTime = int64(d.uploadMean)
 	}
 
 	return stats
