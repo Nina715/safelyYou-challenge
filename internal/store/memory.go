@@ -1,44 +1,64 @@
 package store
 
 import (
-	"fleetmetrics/internal/model"
+	"hash/fnv"
 	"sync"
+
+	"fleetmetrics/internal/model"
 )
 
-type MemoryStore struct {
-	mu      sync.RWMutex
+// numShards controls how many independent locks protect the device map.
+// Distributing devices across shards reduces write contention by ~numShards×
+// compared to a single global mutex.
+const numShards = 16
+
+type shard struct {
+	sync.RWMutex
 	devices map[string]*model.DeviceData
 }
 
+type MemoryStore struct {
+	shards [numShards]shard
+}
+
 func NewMemoryStore() *MemoryStore {
-	return &MemoryStore{
-		devices: make(map[string]*model.DeviceData),
+	ms := &MemoryStore{}
+	for i := range ms.shards {
+		ms.shards[i].devices = make(map[string]*model.DeviceData)
 	}
+	return ms
+}
+
+func (s *MemoryStore) shardFor(deviceID string) *shard {
+	h := fnv.New32a()
+	h.Write([]byte(deviceID))
+	return &s.shards[h.Sum32()%numShards]
 }
 
 func (s *MemoryStore) Register(deviceID string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.devices[deviceID]; ok {
-		return
+	sh := s.shardFor(deviceID)
+	sh.Lock()
+	defer sh.Unlock()
+	if _, ok := sh.devices[deviceID]; !ok {
+		sh.devices[deviceID] = model.NewDeviceData()
 	}
-	s.devices[deviceID] = model.NewDeviceData()
 }
 
 func (s *MemoryStore) Exists(deviceID string) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	_, ok := s.devices[deviceID]
+	sh := s.shardFor(deviceID)
+	sh.RLock()
+	defer sh.RUnlock()
+	_, ok := sh.devices[deviceID]
 	return ok
 }
 
 func (s *MemoryStore) Get(deviceID string) (*model.DeviceData, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	d, ok := s.devices[deviceID]
+	sh := s.shardFor(deviceID)
+	sh.RLock()
+	defer sh.RUnlock()
+	d, ok := sh.devices[deviceID]
 	if !ok {
 		return nil, ErrDeviceNotFound
 	}
 	return d, nil
 }
-
